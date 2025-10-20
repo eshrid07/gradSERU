@@ -62,6 +62,12 @@ DEPTS_BASE_DETAILS = DEPTS_BASE / "Detailed Category Results"
 DEPTS_BASE_GRAPHS  = DEPTS_BASE / "Summary Scores (Graph)"
 DEPTS_BASE_HEATMAP = DEPTS_BASE / "Summary Scores (Heatmap)"
 
+PROGRAM_COLS_BY_INDEX = {
+    "wording": 1,        # use "Wording" as the display text downstream
+    "pct": 5,            # "% Helpful, Very Helpful, or Extremely Helpful"
+    "respondents": 4,    # "# of Responses"
+}
+
 
 def _init_output_dirs():
     """Recompute global paths whenever OUTPUT_DIR changes."""
@@ -191,29 +197,42 @@ def _coerce_percent(val):
         return None
 
 def _read_one_excel(file_path: Path) -> pd.DataFrame:
-    """Read one Excel and return question-level rows with Pct and Respondents."""
+    """
+    Read one Excel and return question-level rows with Pct and Respondents,
+    selecting columns by fixed *positions* rather than names.
+
+    Expects the program files to keep a stable order as defined in
+    PROGRAM_COLS_BY_INDEX.
+    """
     try:
-        df = pd.read_excel(file_path)
+        df = pd.read_excel(file_path, header=0)
     except Exception as e:
         raise RuntimeError(f"Failed to read {file_path.name}: {e}")
 
-    pct_col = _find_first_present(df.columns, POSSIBLE_PCT_COLS)
-    if pct_col is None:
-        raise ValueError(
-            f"{file_path.name} is missing a % column. Expected one of: {POSSIBLE_PCT_COLS}"
-        )
+    # Validate column availability by index
+    ncols = df.shape[1]
+    need = PROGRAM_COLS_BY_INDEX
+    for key, idx in need.items():
+        if idx is None:
+            continue
+        if idx >= ncols:
+            raise ValueError(
+                f"{file_path.name} is missing expected column index {idx} for '{key}'. "
+                f"(Sheet has only {ncols} columns.)"
+            )
 
-    wording_col = _find_first_present(df.columns, POSSIBLE_WORDING_COLS)
-    if wording_col is None:
-        raise ValueError(
-            f"{file_path.name} is missing a wording column. Expected one of: {POSSIBLE_WORDING_COLS}"
-        )
+    # Pull by index (NOT by header names)
+    wording_series      = df.iloc[:, need["wording"]]
+    pct_series_raw      = df.iloc[:, need["pct"]]
+    respondents_series  = df.iloc[:, need["respondents"]] if need["respondents"] is not None else pd.Series(pd.NA, index=df.index)
 
-    resp_col = _find_first_present(df.columns, POSSIBLE_RESP_COLS)
+    # Build the canonical columns used downstream
+    keep = pd.DataFrame({
+        "QuestionText": wording_series,   # keep same downstream name
+        "PctRaw": pct_series_raw
+    })
 
-    keep = df[[wording_col, pct_col]].copy()
-    keep.rename(columns={wording_col: "QuestionText", pct_col: "PctRaw"}, inplace=True)
-
+    # Normalize wording like before
     keep["_wording_norm"] = (
         keep["QuestionText"]
         .astype(str)
@@ -221,15 +240,15 @@ def _read_one_excel(file_path: Path) -> pd.DataFrame:
         .str.replace(r"\s+", " ", regex=True)
         .str.lower()
     )
-    keep["_pct"] = keep["PctRaw"].apply(_coerce_percent)  # expected 0..1
 
-    if resp_col is not None:
-        keep["Respondents"] = pd.to_numeric(df[resp_col], errors="coerce")
-    else:
-        keep["Respondents"] = pd.NA
-        print(f"[WARN] '{file_path.name}' has no '# of Responses' column; Avg Respondents will be blank.", flush=True)
+    # Convert percent text to numeric (uses existing helper)
+    keep["_pct"] = keep["PctRaw"].apply(_coerce_percent)  # expected 0..1 per your pipeline
+
+    # Respondents numeric
+    keep["Respondents"] = pd.to_numeric(respondents_series, errors="coerce")
 
     return keep
+
 
 # Depth-limited file iterators
 def _iter_excels_here(dir_path: Path):

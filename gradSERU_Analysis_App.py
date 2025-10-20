@@ -22,6 +22,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")           # use non-GUI backend for background threads
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -43,23 +44,23 @@ OUTPUT_DIR = Path(r"D:/RA/Data/UMN_College_Output/")
 HEATMAP_MIN_UNITS = 4  # "more than 3"
 
 # Derived dirs — created lazily
-CATEGORIES_DIR = OUTPUT_DIR / "Category_Score_Excel"
-DETAILS_DIR    = OUTPUT_DIR / "Category_Score_Breakdown"
-GRAPH_DIR      = OUTPUT_DIR / "Category_Score_Graphs"
+CATEGORIES_DIR = OUTPUT_DIR / "Summary Scores (Excel)"
+DETAILS_DIR    = OUTPUT_DIR / "Detailed Category Results"
+GRAPH_DIR      = OUTPUT_DIR / "Summary Scores (Graph)"
 
 # Colleges subtree — created lazily
 COLLEGES_BASE    = OUTPUT_DIR / "Colleges"
-COLLEGES_CATS    = COLLEGES_BASE / "Category_Score_Excel"
-COLLEGES_DETAILS = COLLEGES_BASE / "Category_Score_Breakdown"
-COLLEGES_GRAPHS  = COLLEGES_BASE / "Category_Score_Graphs"   # singular as requested
-COLLEGES_HEATMAP = COLLEGES_BASE / "Category_Score_HeatMap"
+COLLEGES_CATS    = COLLEGES_BASE / "Summary Scores (Excel)"
+COLLEGES_DETAILS = COLLEGES_BASE / "Detailed Category Results"
+COLLEGES_GRAPHS  = COLLEGES_BASE / "Summary Scores (Graph)"   # singular as requested
+COLLEGES_HEATMAP = COLLEGES_BASE / "Summary Scores (Heatmap)"
 
 # Departments subtree (used in mixed case)
 DEPTS_BASE         = OUTPUT_DIR / "Departments"
-DEPTS_BASE_CATS    = DEPTS_BASE / "Category_Score_Excel"
-DEPTS_BASE_DETAILS = DEPTS_BASE / "Category_Score_Breakdown"
-DEPTS_BASE_GRAPHS  = DEPTS_BASE / "Category_Score_Graphs"
-DEPTS_BASE_HEATMAP = DEPTS_BASE / "Category_Score_HeatMap"
+DEPTS_BASE_CATS    = DEPTS_BASE / "Summary Scores (Excel)"
+DEPTS_BASE_DETAILS = DEPTS_BASE / "Detailed Category Results"
+DEPTS_BASE_GRAPHS  = DEPTS_BASE / "Summary Scores (Graph)"
+DEPTS_BASE_HEATMAP = DEPTS_BASE / "Summary Scores (Heatmap)"
 
 
 def _init_output_dirs():
@@ -68,21 +69,23 @@ def _init_output_dirs():
     global COLLEGES_BASE, COLLEGES_CATS, COLLEGES_DETAILS, COLLEGES_GRAPHS, COLLEGES_HEATMAP
     global DEPTS_BASE, DEPTS_BASE_CATS, DEPTS_BASE_DETAILS, DEPTS_BASE_GRAPHS, DEPTS_BASE_HEATMAP
 
-    CATEGORIES_DIR = OUTPUT_DIR / "Category_Score_Excel"
-    DETAILS_DIR    = OUTPUT_DIR / "Category_Score_Breakdown"
-    GRAPH_DIR      = OUTPUT_DIR / "Category_Score_Graphs"
+    CATEGORIES_DIR = OUTPUT_DIR / "Summary Scores (Excel)"
+    DETAILS_DIR    = OUTPUT_DIR / "Detailed Category Results"
+    GRAPH_DIR      = OUTPUT_DIR / "Summary Scores (Graph)"
 
     COLLEGES_BASE    = OUTPUT_DIR / "Colleges"
-    COLLEGES_CATS    = COLLEGES_BASE / "Category_Score_Excel"
-    COLLEGES_DETAILS = COLLEGES_BASE / "Category_Score_Breakdown"
-    COLLEGES_GRAPHS  = COLLEGES_BASE / "Category_Score_Graphs"
-    COLLEGES_HEATMAP = COLLEGES_BASE / "Category_Score_HeatMap"
+    COLLEGES_CATS    = COLLEGES_BASE / "Summary Scores (Excel)"
+    COLLEGES_DETAILS = COLLEGES_BASE / "Detailed Category Results"
+    COLLEGES_GRAPHS  = COLLEGES_BASE / "Summary Scores (Graph)"
+    COLLEGES_HEATMAP = COLLEGES_BASE / "Summary Scores (Heatmap)"
 
     DEPTS_BASE         = OUTPUT_DIR / "Departments"
-    DEPTS_BASE_CATS    = DEPTS_BASE / "Category_Score_Excel"
-    DEPTS_BASE_DETAILS = DEPTS_BASE / "Category_Score_Breakdown"
-    DEPTS_BASE_GRAPHS  = DEPTS_BASE / "Category_Score_Graphs"
-    DEPTS_BASE_HEATMAP = DEPTS_BASE / "Category_Score_HeatMap"
+    DEPTS_BASE_CATS    = DEPTS_BASE / "Summary Scores (Excel)"
+    DEPTS_BASE_DETAILS = DEPTS_BASE / "Detailed Category Results"
+    DEPTS_BASE_GRAPHS  = DEPTS_BASE / "Summary Scores (Graph)"
+    DEPTS_BASE_HEATMAP = DEPTS_BASE / "Summary Scores (Heatmap)"
+
+# color for heatmap
 
 
 # Initialize once
@@ -276,7 +279,7 @@ _DEEP_OFFENDERS: set[Path] = set()
 
 def _note_deep_folder(folder: Path):
     if folder not in _DEEP_OFFENDERS:
-        print(f'[WARN] "{folder}" has child folders that cannot be processed (depth too deep).', flush=True)
+        print(f'[WARN] "{folder}" contains sub-folders inside it. Please keep only the Excel files directly inside each Program folder (no extra layers of folders).', flush=True)
         _DEEP_OFFENDERS.add(folder)
 
 # presence scanner respecting depth rules
@@ -400,34 +403,84 @@ def _build_heatmap_matrix(scores_by_unit: dict[str, pd.DataFrame]) -> pd.DataFra
     return mat
 
 def _save_heatmap_excel_and_png(matrix_df: pd.DataFrame, title: str, out_dir: Path, base_name: str):
+    """
+    Save the heatmap matrix as Excel and a polished PNG.
+
+    Features:
+    - White text annotations for better contrast
+    - White grid lines between squares
+    - Custom blue→orange color scale (#2b5c8a → #e88204)
+    - Auto-scaled layout for any number of programs/categories
+    """
     if matrix_df.empty or matrix_df.shape[1] == 0:
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # 1️⃣ Excel export
     excel_path = out_dir / f"{_safe_filename(base_name)}_heatmap.xlsx"
-    to_write = matrix_df.reset_index().rename(columns={"index": "Unit"})
-    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-        to_write.to_excel(writer, sheet_name="Heatmap", index=False)
+    matrix_df.reset_index().rename(columns={"index": "Unit"}).to_excel(
+        excel_path, sheet_name="Heatmap", index=False
+    )
 
-    fig_h = max(3, 0.4 * len(matrix_df.index))
-    fig_w = max(6, 0.45 * len(matrix_df.columns))
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    # 2️⃣ Figure setup
+    n_rows, n_cols = matrix_df.shape
+    fig_w = max(8.0, 0.9 * n_cols + 3.0)
+    fig_h = max(4.5, 0.6 * n_rows + 1.5)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=300)
 
+    # 3️⃣ Prepare data and colormap
     data = matrix_df.to_numpy(dtype=float)
-    im = ax.imshow(data, aspect="auto", vmin=0.0, vmax=1.0)
+    masked = np.ma.masked_invalid(data)
 
-    ax.set_xticks(np.arange(matrix_df.shape[1]))
-    ax.set_xticklabels(matrix_df.columns, rotation=45, ha="right")
-    ax.set_yticks(np.arange(matrix_df.shape[0]))
+    # Blue → Orange gradient (0→1)
+    cmap = LinearSegmentedColormap.from_list("blue_orange", ["#2b5c8a", "#e88204"])
+    cmap.set_bad("#e0e0e0")  # gray for missing values
+
+    # 4️⃣ Draw with white gridlines
+    mesh = ax.pcolormesh(
+        masked,
+        cmap=cmap,
+        edgecolors="white",
+        linewidth=1.0,
+        shading="flat",
+        vmin=0.0,
+        vmax=1.0,
+    )
+
+    # 5️⃣ Axis labels
+    ax.set_xticks(np.arange(n_cols) + 0.5)
+    ax.set_yticks(np.arange(n_rows) + 0.5)
+    ax.set_xticklabels(matrix_df.columns, rotation=35, ha="right", va="top")
     ax.set_yticklabels(matrix_df.index)
-    ax.set_title(title)
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Priority Score", rotation=90)
+    ax.invert_yaxis()
 
+    # 6️⃣ Colorbar
+    cbar = plt.colorbar(mesh, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Priority Score (0 = low, 1 = high)", rotation=90)
+
+    # 7️⃣ Annotate each cell (white text)
+    ann_fs = 10 if max(n_rows, n_cols) <= 12 else 8
+    for i in range(n_rows):
+        for j in range(n_cols):
+            val = data[i, j]
+            if not np.isnan(val):
+                ax.text(
+                    j + 0.5, i + 0.5, f"{val:.2f}",
+                    ha="center", va="center",
+                    fontsize=ann_fs, color="white", fontweight="bold"
+                )
+
+    # 8️⃣ Title and layout
+    ax.set_title(title, fontsize=16, pad=10, color="black")
+    ax.set_xlim(0, n_cols)
+    ax.set_ylim(0, n_rows)
     fig.tight_layout()
+    fig.subplots_adjust(bottom=0.25)
+
+    # 9️⃣ Save PNG
     png_path = out_dir / f"{_safe_filename(base_name)}_heatmap.png"
-    plt.savefig(png_path, dpi=150, bbox_inches="tight")
+    plt.savefig(png_path, bbox_inches="tight")
     plt.close(fig)
 
 # Core (unit = department)
@@ -763,7 +816,7 @@ def run_generation(map_path: Path, colleges_root: Path, output_dir: Path):
 
     combined = pd.concat(combined_results, ignore_index=True)
     combined["Priority Score"] = combined["Priority Score"].round(3)
-    combined_out = OUTPUT_DIR / "ALL_UNITS_category_priority.csv"
+    combined_out = OUTPUT_DIR / "All_Programs_Priority_Summary.csv"
     combined.to_csv(combined_out, index=False)
 
     print("\nAnalysis Completed Successfully.", flush=True)
